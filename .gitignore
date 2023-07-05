@@ -11,6 +11,9 @@
 /julia-*
 /source-dist.tmp
 /source-dist.tmp1
+/build
+/CMakeFiles
+CMakeCache.txt
 
 *.expmap
 *.exe
