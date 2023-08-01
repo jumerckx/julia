@@ -107,15 +107,15 @@ void FinalLowerGC::lowerPushGCFrame(CallInst *target, Function &F)
     StoreInst *inst = builder.CreateAlignedStore(
                 ConstantInt::get(T_size, JL_GC_ENCODE_PUSHARGS(nRoots)),
                 builder.CreateBitCast(
-                        builder.CreateConstInBoundsGEP1_32(T_prjlvalue, gcframe, 0),
-                        T_size->getPointerTo()),
+                        builder.CreateConstInBoundsGEP1_32(T_prjlvalue, gcframe, 0, "frame.nroots"),
+                        T_size->getPointerTo(), "frame.nroots"), // GEP of 0 becomes a noop and eats the name
                 Align(sizeof(void*)));
     inst->setMetadata(LLVMContext::MD_tbaa, tbaa_gcframe);
     auto T_ppjlvalue = JuliaType::get_ppjlvalue_ty(F.getContext());
     inst = builder.CreateAlignedStore(
-            builder.CreateAlignedLoad(T_ppjlvalue, pgcstack, Align(sizeof(void*))),
+            builder.CreateAlignedLoad(T_ppjlvalue, pgcstack, Align(sizeof(void*)), "task.gcstack"),
             builder.CreatePointerCast(
-                    builder.CreateConstInBoundsGEP1_32(T_prjlvalue, gcframe, 1),
+                    builder.CreateConstInBoundsGEP1_32(T_prjlvalue, gcframe, 1, "frame.prev"),
                     PointerType::get(T_ppjlvalue, 0)),
             Align(sizeof(void*)));
     inst->setMetadata(LLVMContext::MD_tbaa, tbaa_gcframe);
@@ -135,7 +135,7 @@ void FinalLowerGC::lowerPopGCFrame(CallInst *target, Function &F)
     builder.SetInsertPoint(target);
     Instruction *gcpop =
         cast<Instruction>(builder.CreateConstInBoundsGEP1_32(T_prjlvalue, gcframe, 1));
-    Instruction *inst = builder.CreateAlignedLoad(T_prjlvalue, gcpop, Align(sizeof(void*)));
+    Instruction *inst = builder.CreateAlignedLoad(T_prjlvalue, gcpop, Align(sizeof(void*)), "frame.prev");
     inst->setMetadata(LLVMContext::MD_tbaa, tbaa_gcframe);
     inst = builder.CreateAlignedStore(
         inst,
@@ -187,12 +187,13 @@ Value *FinalLowerGC::lowerSafepoint(CallInst *target, Function &F)
 Value *FinalLowerGC::lowerGCAllocBytes(CallInst *target, Function &F)
 {
     ++GCAllocBytesCount;
-    assert(target->arg_size() == 2);
+    assert(target->arg_size() == 3);
     CallInst *newI;
 
     IRBuilder<> builder(target);
     builder.SetCurrentDebugLocation(target->getDebugLoc());
     auto ptls = target->getArgOperand(0);
+    auto type = target->getArgOperand(2);
     Attribute derefAttr;
 
     if (auto CI = dyn_cast<ConstantInt>(target->getArgOperand(1))) {
@@ -203,19 +204,19 @@ Value *FinalLowerGC::lowerGCAllocBytes(CallInst *target, Function &F)
         if (offset < 0) {
             newI = builder.CreateCall(
                 bigAllocFunc,
-                { ptls, ConstantInt::get(T_size, sz + sizeof(void*)) });
+                { ptls, ConstantInt::get(T_size, sz + sizeof(void*)), type });
             derefAttr = Attribute::getWithDereferenceableBytes(F.getContext(), sz + sizeof(void*));
         }
         else {
             auto pool_offs = ConstantInt::get(Type::getInt32Ty(F.getContext()), offset);
             auto pool_osize = ConstantInt::get(Type::getInt32Ty(F.getContext()), osize);
-            newI = builder.CreateCall(poolAllocFunc, { ptls, pool_offs, pool_osize });
+            newI = builder.CreateCall(poolAllocFunc, { ptls, pool_offs, pool_osize, type });
             derefAttr = Attribute::getWithDereferenceableBytes(F.getContext(), osize);
         }
     } else {
         auto size = builder.CreateZExtOrTrunc(target->getArgOperand(1), T_size);
         size = builder.CreateAdd(size, ConstantInt::get(T_size, sizeof(void*)));
-        newI = builder.CreateCall(allocTypedFunc, { ptls, size, ConstantPointerNull::get(Type::getInt8PtrTy(F.getContext())) });
+        newI = builder.CreateCall(allocTypedFunc, { ptls, size, type });
         derefAttr = Attribute::getWithDereferenceableBytes(F.getContext(), sizeof(void*));
     }
     newI->setAttributes(newI->getCalledFunction()->getAttributes());
@@ -396,7 +397,7 @@ bool FinalLowerGCLegacy::doInitialization(Module &M) {
 bool FinalLowerGCLegacy::doFinalization(Module &M) {
     auto ret = finalLowerGC.doFinalization(M);
 #ifdef JL_VERIFY_PASSES
-    assert(!verifyModule(M, &errs()));
+    assert(!verifyLLVMIR(M));
 #endif
     return ret;
 }
@@ -414,7 +415,7 @@ PreservedAnalyses FinalLowerGCPass::run(Module &M, ModuleAnalysisManager &AM)
     }
     modified |= finalLowerGC.doFinalization(M);
 #ifdef JL_VERIFY_PASSES
-    assert(!verifyModule(M, &errs()));
+    assert(!verifyLLVMIR(M));
 #endif
     if (modified) {
         return PreservedAnalyses::allInSet<CFGAnalyses>();
