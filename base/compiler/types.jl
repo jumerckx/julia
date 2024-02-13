@@ -15,6 +15,7 @@ the following methods to satisfy the `AbstractInterpreter` API requirement:
 - `get_inference_world(interp::NewInterpreter)` - return the world age for this interpreter
 - `get_inference_cache(interp::NewInterpreter)` - return the local inference cache
 - `cache_owner(interp::NewInterpreter)` - return the owner of any new cache entries
+- `build_opt_pipeline(interp::NewInterpreter)` - return the optimization pipeline for this interpreter
 """
 :(AbstractInterpreter)
 
@@ -402,6 +403,7 @@ OptimizationParams(interp::NativeInterpreter) = interp.opt_params
 get_inference_world(interp::NativeInterpreter) = interp.world
 get_inference_cache(interp::NativeInterpreter) = interp.inf_cache
 cache_owner(interp::NativeInterpreter) = nothing
+build_opt_pipeline(interp::NativeInterpreter) = Core.Compiler.default_opt_pipeline()
 
 """
     already_inferred_quick_test(::AbstractInterpreter, ::MethodInstance)

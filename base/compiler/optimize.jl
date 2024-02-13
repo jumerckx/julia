@@ -985,6 +985,42 @@ function optimize(interp::AbstractInterpreter, opt::OptimizationState, caller::I
     return finish(interp, opt, ir, caller)
 end
 
+struct PassManager
+    passes::Vector{Tuple{String, Function}}
+end
+
+PassManager() = PassManager(Tuple{String, Function}[])
+
+register_pass!(pm::PassManager, name::String, func::Function) = push!(pm.passes, (name, func))
+
+function default_opt_pipeline()::PassManager
+    pm = PassManager()
+
+    register_pass!(pm, "slot2reg", slot2reg)
+    register_pass!(pm, "compact 1", (ir, ci, sv) -> compact!(ir))
+    register_pass!(pm, "Inlining", (ir, ci, sv) -> ssa_inlining_pass!(ir, sv.inlining, ci.propagate_inbounds))
+    register_pass!(pm, "compact 2", (ir, ci, sv) -> compact!(ir))
+    register_pass!(pm, "SROA", (ir, ci, sv) -> sroa_pass!(ir, sv.inlining))
+    register_pass!(pm, "ADCE", (ir, ci, sv) -> adce_pass!(ir, sv.inlining) |> first)
+
+    # TODO: only run when made_changes is true
+    register_pass!(pm, "compact 3", (ir, ci, sv) -> compact!(ir, true))
+
+    if is_asserts()
+        register_pass!(pm, "verify 3", (ir, ci, sv) -> begin
+            verify_ir(ir, true, false, optimizer_lattice(sv.inlining.interp))
+            verify_linetable(ir.linetable)
+        end)
+    end
+
+    return pm
+end
+
+matchpass(optimize_until::Int, stage, _) = optimize_until == stage
+matchpass(optimize_until::String, _, name) = optimize_until == name
+matchpass(::Nothing, _, _) = false
+
+# TODO: this is required for `Revise.track(Core.Compiler)`. This could also be a weird caching issue
 macro pass(name, expr)
     optimize_until = esc(:optimize_until)
     stage = esc(:__stage__)
@@ -996,9 +1032,14 @@ macro pass(name, expr)
     end
 end
 
-matchpass(optimize_until::Int, stage, _) = optimize_until == stage
-matchpass(optimize_until::String, _, name) = optimize_until == name
-matchpass(::Nothing, _, _) = false
+function run_passes(pm::PassManager, ir::IRCode, ci::CodeInfo, sv::OptimizationState, optimize_until = nothing)::IRCode
+    for (stage, (name, func)) in enumerate(pm.passes)
+        matchpass(optimize_until, stage - 1, name) && break
+
+        ir = @timeit name func(ir, ci, sv)
+    end
+    return ir
+end
 
 function run_passes_ipo_safe(
     ci::CodeInfo,
@@ -1006,28 +1047,12 @@ function run_passes_ipo_safe(
     caller::InferenceResult,
     optimize_until = nothing,  # run all passes by default
 )
-    __stage__ = 0  # used by @pass
-    # NOTE: The pass name MUST be unique for `optimize_until::AbstractString` to work
-    @pass "convert"   ir = convert_to_ircode(ci, sv)
-    @pass "slot2reg"  ir = slot2reg(ir, ci, sv)
-    # TODO: Domsorting can produce an updated domtree - no need to recompute here
-    @pass "compact 1" ir = compact!(ir)
-    @pass "Inlining"  ir = ssa_inlining_pass!(ir, sv.inlining, ci.propagate_inbounds)
-    # @timeit "verify 2" verify_ir(ir)
-    @pass "compact 2" ir = compact!(ir)
-    @pass "SROA"      ir = sroa_pass!(ir, sv.inlining)
-    @pass "ADCE"      (ir, made_changes) = adce_pass!(ir, sv.inlining)
-    if made_changes
-        @pass "compact 3" ir = compact!(ir, true)
-    end
-    if is_asserts()
-        @timeit "verify 3" begin
-            verify_ir(ir, true, false, optimizer_lattice(sv.inlining.interp))
-            verify_linetable(ir.linetable)
-        end
-    end
-    @label __done__  # used by @pass
-    return ir
+    interp = sv.inlining.interp
+    
+    pm = build_opt_pipeline(interp)
+
+    ir = convert_to_ircode(ci, sv)
+    return run_passes(pm, ir, ci, sv, optimize_until)
 end
 
 function convert_to_ircode(ci::CodeInfo, sv::OptimizationState)
