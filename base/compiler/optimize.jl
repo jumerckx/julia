@@ -1004,6 +1004,34 @@ function default_opt_pipeline()::PassManager
     register_pass!(pm, "ADCE", (ir, ci, sv) -> adce_pass!(ir, sv.inlining) |> first)
 
     # TODO: only run when made_changes is true
+    # 
+    # One approach for conditional relations between passes, is making every pass return whether 
+    # it needs a compact pass to run afterwards. The calls to `compact!` would not be a
+    # separate pass anymore but could be appended to another pass when necessary. This handles 
+    # all cases in the current optimization pipeline but only works for the compact pass. If, 
+    # in the future, there are other conditional relations between passes, the passes would 
+    # have to be adapted to include data for this relation as well. 
+    #
+    # Secondly, the previous pass could return a boolean with any meaning. This would then be
+    # available to the next pass as an input argument to the pass. The pass itself can then
+    # choose what to do with the value. However, this increases the parameter list of all the
+    # lambdas defined for the passes, it also adds a boolean value without an exact, well-
+    # defined meaning and lastly, the pass itself still runs, it just doesn't execute its
+    # behaviour when it would not be necessary.
+    #
+    # A last solution would be a more general adaptation of the previous pass. Right now, every 
+    # pass takes in the IR from the previous pass and returns the IR for the next pass. In 
+    # addition to this IR, an additional value (of any type) could be included in the return
+    # value. This could act as a boolean flag to notify the need for a compact pass. In other
+    # cases, where the value is not needed, this could just be set to `nothing`. It might even
+    # be useful to pass intermediate data (e.g. dominator tree, CFG, ...) to the next pass.
+    # It would be ideal if this relation could be expressed in the typesystem (e.g. pass 1 
+    # returns a boolean value, pass 2 takes a boolean value and returns an int). However, I 
+    # don't think this is possible.
+    #
+    # Overall, I think the third solution is the best. While it might be easier for developers
+    # make mistakes or misuse the api, it is the most flexible and general solution of the 
+    # three.
     register_pass!(pm, "compact 3", (ir, ci, sv) -> compact!(ir, true))
 
     if is_asserts()
