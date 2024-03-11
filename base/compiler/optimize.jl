@@ -985,59 +985,38 @@ function optimize(interp::AbstractInterpreter, opt::OptimizationState, caller::I
     return finish(interp, opt, ir, caller)
 end
 
-struct PassManager
-    passes::Vector{Tuple{String, Function}}
+struct Pass
+    name::String
+    func::Function
+    conditional::Bool
 end
 
-PassManager() = PassManager(Tuple{String, Function}[])
+struct PassManager
+    passes::Vector{Pass}
+end
 
-register_pass!(pm::PassManager, name::String, func::Function) = push!(pm.passes, (name, func))
+PassManager() = PassManager(Pass[])
+
+register_pass!(pm::PassManager, name::String, func::Function) = push!(pm.passes, Pass(name, func, false))
+register_condpass!(pm::PassManager, name::String, func::Function) = push!(pm.passes, Pass(name, func, true))
 
 function default_opt_pipeline()::PassManager
     pm = PassManager()
 
-    register_pass!(pm, "slot2reg", slot2reg)
-    register_pass!(pm, "compact 1", (ir, ci, sv) -> compact!(ir))
-    register_pass!(pm, "Inlining", (ir, ci, sv) -> ssa_inlining_pass!(ir, sv.inlining, ci.propagate_inbounds))
-    register_pass!(pm, "compact 2", (ir, ci, sv) -> compact!(ir))
-    register_pass!(pm, "SROA", (ir, ci, sv) -> sroa_pass!(ir, sv.inlining))
-    register_pass!(pm, "ADCE", (ir, ci, sv) -> adce_pass!(ir, sv.inlining) |> first)
+    register_pass!(pm, "slot2reg", (ir, ci, sv) -> (slot2reg(ir, ci, sv), true))
+    register_pass!(pm, "compact 1", (ir, ci, sv) -> (compact!(ir), true))
+    register_pass!(pm, "Inlining", (ir, ci, sv) -> (ssa_inlining_pass!(ir, sv.inlining, ci.propagate_inbounds), true))
+    register_pass!(pm, "compact 2", (ir, ci, sv) -> (compact!(ir), true))
+    register_pass!(pm, "SROA", (ir, ci, sv) -> (sroa_pass!(ir, sv.inlining), true))
 
-    # TODO: only run when made_changes is true
-    # 
-    # One approach for conditional relations between passes, is making every pass return whether 
-    # it needs a compact pass to run afterwards. The calls to `compact!` would not be a
-    # separate pass anymore but could be appended to another pass when necessary. This handles 
-    # all cases in the current optimization pipeline but only works for the compact pass. If, 
-    # in the future, there are other conditional relations between passes, the passes would 
-    # have to be adapted to include data for this relation as well. 
-    #
-    # Secondly, the previous pass could return a boolean with any meaning. This would then be
-    # available to the next pass as an input argument to the pass. The pass itself can then
-    # choose what to do with the value. However, this increases the parameter list of all the
-    # lambdas defined for the passes, it also adds a boolean value without an exact, well-
-    # defined meaning and lastly, the pass itself still runs, it just doesn't execute its
-    # behaviour when it would not be necessary.
-    #
-    # A last solution would be a more general adaptation of the previous pass. Right now, every 
-    # pass takes in the IR from the previous pass and returns the IR for the next pass. In 
-    # addition to this IR, an additional value (of any type) could be included in the return
-    # value. This could act as a boolean flag to notify the need for a compact pass. In other
-    # cases, where the value is not needed, this could just be set to `nothing`. It might even
-    # be useful to pass intermediate data (e.g. dominator tree, CFG, ...) to the next pass.
-    # It would be ideal if this relation could be expressed in the typesystem (e.g. pass 1 
-    # returns a boolean value, pass 2 takes a boolean value and returns an int). However, I 
-    # don't think this is possible.
-    #
-    # Overall, I think the third solution is the best. While it might be easier for developers
-    # make mistakes or misuse the api, it is the most flexible and general solution of the 
-    # three.
-    register_pass!(pm, "compact 3", (ir, ci, sv) -> compact!(ir, true))
+    register_pass!(pm, "ADCE", (ir, ci, sv) -> adce_pass!(ir, sv.inlining))
+    register_condpass!(pm, "compact 3", (ir, ci, sv) -> (compact!(ir, true), true))
 
     if is_asserts()
         register_pass!(pm, "verify 3", (ir, ci, sv) -> begin
             verify_ir(ir, true, false, optimizer_lattice(sv.inlining.interp))
             verify_linetable(ir.linetable)
+            return (ir, true)
         end)
     end
 
@@ -1048,24 +1027,20 @@ matchpass(optimize_until::Int, stage, _) = optimize_until == stage
 matchpass(optimize_until::String, _, name) = optimize_until == name
 matchpass(::Nothing, _, _) = false
 
-# TODO: this is required for `Revise.track(Core.Compiler)`. This could also be a weird caching issue
-macro pass(name, expr)
-    optimize_until = esc(:optimize_until)
-    stage = esc(:__stage__)
-    macrocall = :(@timeit $(esc(name)) $(esc(expr)))
-    macrocall.args[2] = __source__  # `@timeit` may want to use it
-    quote
-        $macrocall
-        matchpass($optimize_until, ($stage += 1), $(esc(name))) && $(esc(:(@goto __done__)))
-    end
-end
-
 function run_passes(pm::PassManager, ir::IRCode, ci::CodeInfo, sv::OptimizationState, optimize_until = nothing)::IRCode
-    for (stage, (name, func)) in enumerate(pm.passes)
-        matchpass(optimize_until, stage - 1, name) && break
+    made_changes = true
 
-        ir = @timeit name func(ir, ci, sv)
+    for (stage, pass) in enumerate(pm.passes)
+        matchpass(optimize_until, stage - 1, pass.name) && break
+
+        if pass.conditional && !made_changes 
+            made_changes = true
+            continue
+        end
+
+        ir, made_changes = @timeit pass.name pass.func(ir, ci, sv)
     end
+
     return ir
 end
 
