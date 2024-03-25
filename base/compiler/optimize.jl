@@ -985,10 +985,14 @@ function optimize(interp::AbstractInterpreter, opt::OptimizationState, caller::I
     return finish(interp, opt, ir, caller)
 end
 
+const PassNormal = 1
+const PassConditional = 2
+const PassFixedpoint = 3
+
 struct Pass
     name::String
     func::Function
-    conditional::Bool
+    type::Int
 end
 
 struct PassManager
@@ -997,8 +1001,9 @@ end
 
 PassManager() = PassManager(Pass[])
 
-register_pass!(pm::PassManager, name::String, func::Function) = push!(pm.passes, Pass(name, func, false))
-register_condpass!(pm::PassManager, name::String, func::Function) = push!(pm.passes, Pass(name, func, true))
+register_pass!(pm::PassManager, name::String, func::Function) = push!(pm.passes, Pass(name, func, PassNormal))
+register_condpass!(pm::PassManager, name::String, func::Function) = push!(pm.passes, Pass(name, func, PassConditional))
+register_fixedpointpass!(pm::PassManager, name::String, func::Function) = push!(pm.passes, Pass(name, func, PassFixedpoint))
 
 function default_opt_pipeline()::PassManager
     pm = PassManager()
@@ -1035,8 +1040,17 @@ function run_passes(pm::PassManager, ir, ci::CodeInfo, sv::OptimizationState, op
     for (stage, pass) in enumerate(pm.passes)
         matchpass(optimize_until, stage - 1, pass.name) && break
 
-        if pass.conditional && !made_changes 
+        if pass.type == PassConditional && !made_changes 
             made_changes = true
+            continue
+        end
+
+        if pass.type == PassFixedpoint
+            made_changes = true
+            while made_changes
+                ir, made_changes = @timeit pass.name pass.func(ir, ci, sv)
+            end
+
             continue
         end
 
