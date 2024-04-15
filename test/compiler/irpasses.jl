@@ -1504,7 +1504,7 @@ let code = Any[
     end
 
     ir = Core.Compiler.convert_to_ircode(src, sv)
-    ir = Core.Compiler.slot2reg(ir, src, sv)
+    ir = Core.Compiler.slot2reg(ir, src, sv) |> first
     ir = Core.Compiler.compact!(ir)
 
     Core.Compiler.verify_ir(ir)

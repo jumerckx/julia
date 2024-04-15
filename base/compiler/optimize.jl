@@ -1008,12 +1008,10 @@ register_fixedpointpass!(pm::PassManager, name::String, func::Function) = push!(
 function default_opt_pipeline()::PassManager
     pm = PassManager()
 
-    # TODO: this takes a different type for the `ir` parameter 
-    register_pass!(pm, "to ircode", (ir, ci, sv) -> (convert_to_ircode(ci, sv), true))
-    register_pass!(pm, "slot2reg", (ir, ci, sv) -> (slot2reg(ir, ci, sv), true))
+    register_pass!(pm, "slot2reg", slot2reg)
     register_pass!(pm, "compact 1", (ir, ci, sv) -> (compact!(ir), true))
-    register_pass!(pm, "Inlining", (ir, ci, sv) -> (ssa_inlining_pass!(ir, sv.inlining, ci.propagate_inbounds), true))
-    register_pass!(pm, "compact 2", (ir, ci, sv) -> (compact!(ir), true))
+    register_pass!(pm, "Inlining", (ir, ci, sv) -> ssa_inlining_pass!(ir, sv.inlining, ci.propagate_inbounds))
+    register_condpass!(pm, "compact 2", (ir, ci, sv) -> (compact!(ir), true))
     register_pass!(pm, "SROA", (ir, ci, sv) -> (sroa_pass!(ir, sv.inlining), true))
 
     register_pass!(pm, "ADCE", (ir, ci, sv) -> adce_pass!(ir, sv.inlining))
@@ -1034,7 +1032,7 @@ matchpass(optimize_until::Int, stage, _) = optimize_until == stage
 matchpass(optimize_until::String, _, name) = optimize_until == name
 matchpass(::Nothing, _, _) = false
 
-function run_passes(pm::PassManager, ir, ci::CodeInfo, sv::OptimizationState, optimize_until = nothing)::IRCode
+function run_passes(pm::PassManager, ir::IRCode, ci::CodeInfo, sv::OptimizationState, optimize_until = nothing)::IRCode
     made_changes = true
 
     for (stage, pass) in enumerate(pm.passes)
@@ -1066,11 +1064,10 @@ function run_passes_ipo_safe(
     caller::InferenceResult,
     optimize_until = nothing,  # run all passes by default
 )
-    interp = sv.inlining.interp
-    
-    pm = build_opt_pipeline(interp)
+    pm = build_opt_pipeline(sv.inlining.interp)
 
-    return run_passes(pm, nothing, ci, sv, optimize_until)
+    ir = convert_to_ircode(ci, sv)
+    return run_passes(pm, ir, ci, sv, optimize_until)
 end
 
 function convert_to_ircode(ci::CodeInfo, sv::OptimizationState)
@@ -1263,7 +1260,7 @@ function slot2reg(ir::IRCode, ci::CodeInfo, sv::OptimizationState)
     # NOTE now we have converted `ir` to the SSA form and eliminated slots
     # let's resize `argtypes` now and remove unnecessary types for the eliminated slots
     resize!(ir.argtypes, nargs)
-    return ir
+    return ir, true
 end
 
 ## Computing the cost of a function body

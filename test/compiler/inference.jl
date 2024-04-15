@@ -4269,7 +4269,7 @@ let # Test the presence of PhiNodes in lowered IR by taking the above function,
     ci.ssavaluetypes = Any[Any for i = 1:ci.ssavaluetypes]
     sv = Core.Compiler.OptimizationState(mi, Core.Compiler.NativeInterpreter())
     ir = Core.Compiler.convert_to_ircode(ci, sv)
-    ir = Core.Compiler.slot2reg(ir, ci, sv)
+    ir = Core.Compiler.slot2reg(ir, ci, sv) |> first
     ir = Core.Compiler.compact!(ir)
     Core.Compiler.replace_code_newstyle!(ci, ir)
     ci.ssavaluetypes = length(ci.ssavaluetypes)
