@@ -1032,14 +1032,13 @@ matchpass(optimize_until::Int, stage, _) = optimize_until == stage
 matchpass(optimize_until::String, _, name) = optimize_until == name
 matchpass(::Nothing, _, _) = false
 
-function run_passes(pm::PassManager, ir::IRCode, ci::CodeInfo, sv::OptimizationState, optimize_until = nothing)::IRCode
+function run_passes(pm::PassManager, ir::IRCode, ci::CodeInfo, sv::OptimizationState, optimize_until = nothing)
     made_changes = true
 
     for (stage, pass) in enumerate(pm.passes)
         matchpass(optimize_until, stage - 1, pass.name) && break
 
-        if pass.type == PassConditional && !made_changes 
-            made_changes = true
+        if pass.type == PassConditional && !made_changes
             continue
         end
 
@@ -1055,7 +1054,7 @@ function run_passes(pm::PassManager, ir::IRCode, ci::CodeInfo, sv::OptimizationS
         ir, made_changes = @timeit pass.name pass.func(ir, ci, sv)
     end
 
-    return ir
+    return ir, made_changes
 end
 
 function run_passes_ipo_safe(
@@ -1067,7 +1066,7 @@ function run_passes_ipo_safe(
     pm = build_opt_pipeline(sv.inlining.interp)
 
     ir = convert_to_ircode(ci, sv)
-    return run_passes(pm, ir, ci, sv, optimize_until)
+    return run_passes(pm, ir, ci, sv, optimize_until) |> first
 end
 
 function convert_to_ircode(ci::CodeInfo, sv::OptimizationState)
