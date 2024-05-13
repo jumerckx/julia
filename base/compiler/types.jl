@@ -403,7 +403,7 @@ OptimizationParams(interp::NativeInterpreter) = interp.opt_params
 get_inference_world(interp::NativeInterpreter) = interp.world
 get_inference_cache(interp::NativeInterpreter) = interp.inf_cache
 cache_owner(interp::NativeInterpreter) = nothing
-build_opt_pipeline(interp::NativeInterpreter) = Core.Compiler.default_opt_pipeline()
+build_opt_pipeline(interp::NativeInterpreter) = Core.Compiler.DEFAULT_OPT_PIPELINE
 
 """
     already_inferred_quick_test(::AbstractInterpreter, ::MethodInstance)

@@ -29,7 +29,7 @@ CC.OptimizationParams(interp::InvalidationTester) = interp.opt_params
 CC.get_inference_world(interp::InvalidationTester) = interp.world
 CC.get_inference_cache(interp::InvalidationTester) = interp.inf_cache
 CC.cache_owner(::InvalidationTester) = InvalidationTesterToken()
-CC.build_opt_pipeline(::InvalidationTester) = CC.default_opt_pipeline()
+CC.build_opt_pipeline(::InvalidationTester) = CC.DEFAULT_OPT_PIPELINE
 
 # basic functionality test
 # ------------------------
