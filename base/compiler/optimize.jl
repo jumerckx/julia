@@ -985,15 +985,7 @@ function optimize(interp::AbstractInterpreter, opt::OptimizationState, caller::I
     return finish(interp, opt, ir, caller)
 end
 
-const PassNormal = 1
-const PassConditional = 2
-const PassFixedpoint = 3
-
-struct Pass
-    name::String
-    func::Function
-    type::Int
-end
+abstract type Pass end
 
 struct PassManager
     passes::Vector{Pass}
@@ -1001,27 +993,72 @@ end
 
 PassManager() = PassManager(Pass[])
 
-register_pass!(pm::PassManager, name::String, func::Function) = push!(pm.passes, Pass(name, func, PassNormal))
-register_condpass!(pm::PassManager, name::String, func::Function) = push!(pm.passes, Pass(name, func, PassConditional))
-register_fixedpointpass!(pm::PassManager, name::String, func::Function) = push!(pm.passes, Pass(name, func, PassFixedpoint))
+struct RegularPass <: Pass
+    name::String
+    func::Function
+end
+
+struct ConditionalPass <: Pass
+    name::String
+    func::Function
+    condition::Vector{Symbol}
+end
+
+struct FixedpointPass <: Pass
+    name::String
+    func::PassManager
+    condition::Vector{Symbol}
+end
+
+register_pass!(pm, name, func) = push!(pm.passes, RegularPass(name, func))
+register_condpass!(pm, name, condition::Symbol, func) = push!(pm.passes, ConditionalPass(name, func, [condition]))
+register_condpass!(pm, name, condition::Vector{Symbol}, func) = push!(pm.passes, ConditionalPass(name, func, condition))
+register_fixedpointpass!(pm, name, condition::Symbol, func) = push!(pm.passes, FixedpointPass(name, func, [condition]))
+register_fixedpointpass!(pm, name, condition::Vector{Symbol}, func) = push!(pm.passes, FixedpointPass(name, func, condition))
+
+# Some passes return a boolean value to signal a change was made to the IR. The pass manger
+# expects an optional Symbol value instead. This wrapper converts the result of a pass to
+# the specified symbol
+setsymbol(sym) = function (func)
+    (ir, ci, sv) -> begin
+        (ir, made_changes) = func(ir, ci, sv)
+        symbol = (made_changes ? sym : nothing)
+        (ir, symbol)
+    end
+end
+
+# Most passes don't return a changed flag, we have to add a change symbol 
+attachsymbol(sym) = function(func)
+    (ir, ci, sv) -> (func(ir, ci, sv), sym)
+end
+
+# A set of helper functions to make all passes take the same arguments. The return type
+# of the shared interface is handled when registering the passes as the specific symbols
+# have to be attached to each pass.
+compactpass!(ir, ci, sv) = @inline compact!(ir)
+inliningpass!(ir, ci, sv) = @inline ssa_inlining_pass!(ir, sv.inlining, ci.propagate_inbounds)
+sroapass!(ir, ci, sv) = @inline sroa_pass!(ir, sv.inlining)
+adcepass!(ir, ci, sv) = @inline adce_pass!(ir, sv.inlining)
+compactcfgpass!(ir, ci, sv) = @inline compact!(ir, true)
 
 function default_opt_pipeline()::PassManager
     pm = PassManager()
 
-    register_pass!(pm, "slot2reg", slot2reg)
-    register_pass!(pm, "compact 1", (ir, ci, sv) -> (compact!(ir), true))
-    register_pass!(pm, "Inlining", (ir, ci, sv) -> ssa_inlining_pass!(ir, sv.inlining, ci.propagate_inbounds))
-    register_condpass!(pm, "compact 2", (ir, ci, sv) -> (compact!(ir), true))
-    register_pass!(pm, "SROA", (ir, ci, sv) -> (sroa_pass!(ir, sv.inlining), true))
+    register_pass!(pm, "slot2reg", slot2reg |> attachsymbol(:slot2reg))
+    register_pass!(pm, "compact 1", compactpass! |> attachsymbol(:compact1))
 
-    register_pass!(pm, "ADCE", (ir, ci, sv) -> adce_pass!(ir, sv.inlining))
-    register_condpass!(pm, "compact 3", (ir, ci, sv) -> (compact!(ir, true), true))
+    register_pass!(pm, "Inlining", inliningpass! |> attachsymbol(:inlining))
+    register_pass!(pm, "compact 2", compactpass! |> attachsymbol(:compact2))
+
+    register_pass!(pm, "SROA", sroapass! |> attachsymbol(:sroa))
+    register_pass!(pm, "ADCE", adcepass! |> setsymbol(:adce))
+    register_condpass!(pm, "compact 3", :adce, compactcfgpass! |> attachsymbol(:compact3))
 
     if is_asserts()
         register_pass!(pm, "verify 3", (ir, ci, sv) -> begin
             verify_ir(ir, true, false, optimizer_lattice(sv.inlining.interp))
             verify_linetable(ir.linetable)
-            return (ir, true)
+            return (ir, :verify3)
         end)
     end
 
@@ -1033,28 +1070,53 @@ matchpass(optimize_until::String, _, name) = optimize_until == name
 matchpass(::Nothing, _, _) = false
 
 function run_passes(pm::PassManager, ir::IRCode, ci::CodeInfo, sv::OptimizationState, optimize_until = nothing)
-    made_changes = true
+    # Keep track of which passes made changes during this run of the optimization pipeline
+    change_set = []
 
     for (stage, pass) in enumerate(pm.passes)
+        # If we match the optimize_until, stop the pipeline
         matchpass(optimize_until, stage - 1, pass.name) && break
 
-        if pass.type == PassConditional && !made_changes
+        if pass isa RegularPass
+            ir, sym = @timeit pass.name pass.func(ir, ci, sv)
+            sym !== nothing && push!(change_set, sym)
             continue
         end
 
-        if pass.type == PassFixedpoint
-            made_changes = true
-            while made_changes
-                ir, made_changes = @timeit pass.name pass.func(ir, ci, sv)
+        if pass isa ConditionalPass
+            if any(c -> c in change_set, pass.condition)
+                ir, sym = @timeit pass.name pass.func(ir, ci, sv)
+                sym !== nothing && push!(change_set, sym)
             end
-
             continue
         end
 
-        ir, made_changes = @timeit pass.name pass.func(ir, ci, sv)
+        if pass isa FixedpointPass
+            # Keep track of the changes in the current iteration
+            iter_changes = []
+
+            # Flag to ensure the fixedpoint loop executes at least once
+            first = true
+
+            # Keep iterating until we've execute at least one iteration and no of the passes
+            # in the condition made changes
+            while first || any(c -> c in iter_changes, pass.condition)
+
+                # Execute all passes in the pass manager defining the fixedpoint body 
+                ir, iter_changes = run_passes(pass.func, ir, ci, sv)
+
+                # Add all changes to the changes of the full optimization pipeline
+                for change in iter_changes
+                    change in change_set || push!(change_set, change)
+                end
+
+                # Done with the first iteration
+                first = false
+            end
+        end
     end
 
-    return ir, made_changes
+    return ir, change_set
 end
 
 function run_passes_ipo_safe(
@@ -1259,7 +1321,7 @@ function slot2reg(ir::IRCode, ci::CodeInfo, sv::OptimizationState)
     # NOTE now we have converted `ir` to the SSA form and eliminated slots
     # let's resize `argtypes` now and remove unnecessary types for the eliminated slots
     resize!(ir.argtypes, nargs)
-    return ir, true
+    return ir
 end
 
 ## Computing the cost of a function body
