@@ -1027,7 +1027,7 @@ setsymbol(sym) = function (func)
     end
 end
 
-# Most passes don't return a changed flag, we have to add a change symbol 
+# Most passes don't return a changed flag, we have to add a change symbol
 attachsymbol(sym) = function(func)
     (ir, ci, sv) -> (func(ir, ci, sv), sym)
 end
@@ -1074,13 +1074,9 @@ function run_passes(pm::PassManager, ir::IRCode, ci::CodeInfo, sv::OptimizationS
     change_set = []
 
     for (stage, pass) in enumerate(pm.passes)
-        # If we match the optimize_until, stop the pipeline
-        matchpass(optimize_until, stage - 1, pass.name) && break
-
         if pass isa RegularPass
             ir, sym = @timeit pass.name pass.func(ir, ci, sv)
             sym !== nothing && push!(change_set, sym)
-            continue
         end
 
         if pass isa ConditionalPass
@@ -1088,7 +1084,6 @@ function run_passes(pm::PassManager, ir::IRCode, ci::CodeInfo, sv::OptimizationS
                 ir, sym = @timeit pass.name pass.func(ir, ci, sv)
                 sym !== nothing && push!(change_set, sym)
             end
-            continue
         end
 
         if pass isa FixedpointPass
@@ -1102,7 +1097,7 @@ function run_passes(pm::PassManager, ir::IRCode, ci::CodeInfo, sv::OptimizationS
             # in the condition made changes
             while first || any(c -> c in iter_changes, pass.condition)
 
-                # Execute all passes in the pass manager defining the fixedpoint body 
+                # Execute all passes in the pass manager defining the fixedpoint body
                 ir, iter_changes = run_passes(pass.func, ir, ci, sv)
 
                 # Add all changes to the changes of the full optimization pipeline
@@ -1114,6 +1109,9 @@ function run_passes(pm::PassManager, ir::IRCode, ci::CodeInfo, sv::OptimizationS
                 first = false
             end
         end
+
+        # If we match the optimize_until, stop the pipeline
+        matchpass(optimize_until, stage + 1, pass.name) && break
     end
 
     return ir, change_set
@@ -1128,6 +1126,8 @@ function run_passes_ipo_safe(
     pm = build_opt_pipeline(sv.inlining.interp)
 
     ir = convert_to_ircode(ci, sv)
+    matchpass(optimize_until, 1, "convert") && return ir
+
     return run_passes(pm, ir, ci, sv, optimize_until) |> first
 end
 
